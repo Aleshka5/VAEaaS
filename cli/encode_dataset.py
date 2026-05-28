@@ -81,10 +81,25 @@ def _save_latent_sft_file(
     return str(output_sft_path)
 
 
+def _to_cpu_detached(tensor: torch.Tensor) -> torch.Tensor:
+    tensor = tensor.detach()
+    if tensor.device.type != "cpu":
+        tensor = tensor.cpu()
+    return tensor
+
+
 def _build_output_path(input_sft_path: str, output_dir: str, output_suffix: str) -> Path:
     input_path = Path(input_sft_path)
     out_dir = Path(output_dir)
     return out_dir / f"{input_path.stem}{output_suffix}"
+
+
+def _build_output_part_path(base_output_path: Path, part_idx: int, total_parts: int) -> Path:
+    if total_parts <= 1:
+        return base_output_path
+    return base_output_path.with_name(
+        f"{base_output_path.stem}_part{part_idx:05d}{base_output_path.suffix}"
+    )
 
 
 def _render_progress(current: int, total: int, *, width: int = 30) -> str:
@@ -113,7 +128,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir",
-        default="D:/Films/converted_96/latents",
+        required=True,
         help="Папка, куда сохранять .sft с латентами (1 файл на каждый входной датасет).",
     )
     parser.add_argument(
@@ -128,7 +143,20 @@ def main() -> None:
     parser.add_argument(
         "--device", default=settings.default_device if torch.cuda.is_available() else "cpu"
     )
-    parser.add_argument("--batch-size", type=int, default=settings.kvae_batch_size)
+    parser.add_argument(
+        "--vae-batch-size",
+        "--batch-size",
+        dest="vae_batch_size",
+        type=int,
+        default=settings.kvae_batch_size,
+        help="Размер батча для прогона через VAE encoder (алиас: --batch-size).",
+    )
+    parser.add_argument(
+        "--save-batch-size",
+        type=int,
+        default=settings.kvae_batch_size,
+        help="Размер батча для сохранения в выходные .sft части.",
+    )
     parser.add_argument("--mlflow-tracking-uri", default=settings.mlflow_tracking_uri)
     parser.add_argument("--mlflow-registry-uri", default=settings.mlflow_registry_uri)
     parser.add_argument(
@@ -144,6 +172,10 @@ def main() -> None:
     parser.add_argument("--artifacts-run-name", default="encode-dataset-artifacts")
     parser.add_argument("--artifacts-subdir", default="encoded_sft")
     args = parser.parse_args()
+    if args.vae_batch_size <= 0:
+        raise ValueError(f"--vae-batch-size должен быть > 0, получено: {args.vae_batch_size}")
+    if args.save_batch_size <= 0:
+        raise ValueError(f"--save-batch-size должен быть > 0, получено: {args.save_batch_size}")
 
     repo = MLFlowRepository(
         tracking_uri=args.mlflow_tracking_uri,
@@ -173,60 +205,100 @@ def main() -> None:
         del tensors
         total_frames = int(frames.shape[0])
         print(f"Frames found: {total_frames}")
-        latents_70_cpu_batches: list[torch.Tensor] = []
-        latents_54_cpu_batches: list[torch.Tensor] = []
-        latents_16_cpu_batches: list[torch.Tensor] = []
-        processed_frames = 0
-        started_at = time.time()
-        with torch.no_grad():
-            for batch in frames.split(args.batch_size, dim=0):
-                batch_latents = encoder(batch)
-                batch_70, batch_54, batch_16 = _split_latents(batch_latents)
-                latents_70_cpu_batches.append(batch_70.detach().cpu())
-                latents_54_cpu_batches.append(batch_54.detach().cpu())
-                latents_16_cpu_batches.append(batch_16.detach().cpu())
-                processed_frames += int(batch.shape[0])
-                progress = _render_progress(processed_frames, total_frames)
-                print(f"\rEncoding frames {progress}", end="", flush=True)
-                del batch_latents, batch_70, batch_54, batch_16, batch
-        elapsed = time.time() - started_at
-        print(f"\rEncoding frames {_render_progress(total_frames, total_frames)} | {elapsed:.1f}s")
-        latents_70x30 = torch.cat(latents_70_cpu_batches, dim=0)
-        latents_54x30 = torch.cat(latents_54_cpu_batches, dim=0)
-        latents_16x30 = torch.cat(latents_16_cpu_batches, dim=0)
-
         output_sft_path = _build_output_path(
             input_sft_path=input_sft_path,
             output_dir=args.output_dir,
             output_suffix=args.output_suffix,
         )
-        saved_path = _save_latent_sft_file(
-            output_sft_path=output_sft_path,
-            latents_70x30=latents_70x30,
-            latents_54x30=latents_54x30,
-            latents_16x30=latents_16x30,
-        )
-        saved_paths.append(saved_path)
-        print(f"Saved: {saved_path}")
+        total_parts = (total_frames + args.save_batch_size - 1) // args.save_batch_size
+        dataset_saved_paths: list[str] = []
+        processed_frames = 0
+        part_idx = 0
+        latents_70_buffer: torch.Tensor | None = None
+        latents_54_buffer: torch.Tensor | None = None
+        latents_16_buffer: torch.Tensor | None = None
+        started_at = time.time()
+        with torch.no_grad():
+            for batch in frames.split(args.vae_batch_size, dim=0):
+                batch_latents = encoder(batch)
+                batch_70, batch_54, batch_16 = _split_latents(batch_latents)
+                batch_70 = _to_cpu_detached(batch_70)
+                batch_54 = _to_cpu_detached(batch_54)
+                batch_16 = _to_cpu_detached(batch_16)
+
+                if latents_70_buffer is None:
+                    latents_70_buffer = batch_70
+                    latents_54_buffer = batch_54
+                    latents_16_buffer = batch_16
+                else:
+                    latents_70_buffer = torch.cat((latents_70_buffer, batch_70), dim=0)
+                    latents_54_buffer = torch.cat((latents_54_buffer, batch_54), dim=0)
+                    latents_16_buffer = torch.cat((latents_16_buffer, batch_16), dim=0)
+
+                while latents_70_buffer.shape[0] >= args.save_batch_size:
+                    part_idx += 1
+                    output_part_path = _build_output_part_path(
+                        base_output_path=output_sft_path,
+                        part_idx=part_idx,
+                        total_parts=total_parts,
+                    )
+                    saved_part_path = _save_latent_sft_file(
+                        output_sft_path=output_part_path,
+                        latents_70x30=latents_70_buffer[: args.save_batch_size],
+                        latents_54x30=latents_54_buffer[: args.save_batch_size],
+                        latents_16x30=latents_16_buffer[: args.save_batch_size],
+                    )
+                    dataset_saved_paths.append(saved_part_path)
+                    latents_70_buffer = latents_70_buffer[args.save_batch_size :]
+                    latents_54_buffer = latents_54_buffer[args.save_batch_size :]
+                    latents_16_buffer = latents_16_buffer[args.save_batch_size :]
+
+                processed_frames += int(batch.shape[0])
+                progress = _render_progress(processed_frames, total_frames)
+                print(f"\rEncoding frames {progress}", end="", flush=True)
+                del batch_latents, batch_70, batch_54, batch_16, batch
+            if latents_70_buffer is not None and latents_70_buffer.shape[0] > 0:
+                part_idx += 1
+                output_part_path = _build_output_part_path(
+                    base_output_path=output_sft_path,
+                    part_idx=part_idx,
+                    total_parts=total_parts,
+                )
+                saved_part_path = _save_latent_sft_file(
+                    output_sft_path=output_part_path,
+                    latents_70x30=latents_70_buffer,
+                    latents_54x30=latents_54_buffer,
+                    latents_16x30=latents_16_buffer,
+                )
+                dataset_saved_paths.append(saved_part_path)
+                del latents_70_buffer, latents_54_buffer, latents_16_buffer
+        elapsed = time.time() - started_at
+        print(f"\rEncoding frames {_render_progress(total_frames, total_frames)} | {elapsed:.1f}s")
+        saved_paths.extend(dataset_saved_paths)
+        print(f"Saved {len(dataset_saved_paths)} file(s):")
+        for saved_path in dataset_saved_paths:
+            print(f" - {saved_path}")
 
         if args.log_sft_artifacts:
             result = repo.log_artifacts(
-                artifact_paths=[saved_path],
-                run_name=args.artifacts_run_name,
+                artifact_paths=dataset_saved_paths,
+                run_name=Path(input_sft_path).stem,
                 artifact_subdir=args.artifacts_subdir,
                 tags={
                     "pipeline": "encode_dataset",
                     "encoder_model_name": args.encoder_model_name,
+                    "vae_batch_size": str(args.vae_batch_size),
+                    "save_batch_size": str(args.save_batch_size),
                     "input_sft_count": str(len(args.input_sft)),
                     "input_sft_path": str(input_sft_path),
+                    "saved_parts_count": str(len(dataset_saved_paths)),
                 },
             )
             print(f"MLflow artifact run_id for dataset: {result['run_id']}")
 
         # Явно освобождаем крупные объекты после каждого датасета.
         del frames
-        del latents_70_cpu_batches, latents_54_cpu_batches, latents_16_cpu_batches
-        del latents_70x30, latents_54x30, latents_16x30
+        del dataset_saved_paths
         gc.collect()
         if torch.cuda.is_available() and str(args.device).startswith("cuda"):
             torch.cuda.empty_cache()
@@ -238,6 +310,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    """
+    r"""
      uv run --env-file .env -m cli.encode_dataset --input-sft "D:\Films\converted_96\sfts\GOT1_cuts.sft" "D:\Films\converted_96\sfts\GOT2_cuts.sft" "D:\Films\converted_96\sfts\GOT3_cuts.sft" "D:\Films\converted_96\sfts\GOT4_cuts.sft" "D:\Films\converted_96\sfts\GOT5_cuts.sft" "D:\Films\converted_96\sfts\GOT6_cuts.sft" "D:\Films\converted_96\sfts\GOT7_cuts.sft" "D:\Films\converted_96\sfts\GOT8_cuts.sft" "D:\Films\converted_96\sfts\GOT9_cuts.sft" "D:\Films\converted_96\sfts\GOT10_cuts.sft"
     """

@@ -90,7 +90,8 @@ def _plot_samples(
         decoded_images = None
         if decoder is not None:
             decoded_images = [
-                _decode_to_rgb01(decoder=decoder, latent_chw=part, device=device) for part in parts_chw
+                _decode_to_rgb01(decoder=decoder, latent_chw=part, device=device)
+                for part in parts_chw
             ]
 
         latent_row = row_idx * row_factor
@@ -158,7 +159,7 @@ def main() -> None:
     parser.add_argument("--latents-54-key", default="latents_54x30")
     parser.add_argument("--latents-16-key", default="latents_16x30")
     parser.add_argument("--samples", type=int, default=8, help="Сколько случайных строк показать.")
-    parser.add_argument("--seed", type=int, default=42, help="Seed для воспроизводимой выборки.")
+    parser.add_argument("--seed", type=int, default=127, help="Seed для воспроизводимой выборки.")
     parser.add_argument(
         "--device", default=settings.default_device if torch.cuda.is_available() else "cpu"
     )

@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi>=0.116.0",
+    "requests>=2.32.0",
     "pydantic-settings>=2.6.1",
     "torch",
     "torchvision",
@@ -17,6 +19,12 @@ dependencies = [
     "diffusers @ git+https://github.com/huggingface/diffusers.git",
     "mlflow>=3.11.1",
     "boto3>=1.42.96",
+    "torchserve>=0.12.0",
+    "torch-model-archiver>=0.12.0",
+    "nvgpu>=0.10.0",
+    "nvidia-ml-py>=13.595.45",
+    "av>=17.0.1",
+    "uvicorn>=0.35.0",
 ]
 
 # Сборки torch/torchvision с CUDA (см. https://pytorch.org/get-started/locally/ )
@@ -28,3 +36,8 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu124" }
 torchvision = { index = "pytorch-cu124" }
+
+[dependency-groups]
+dev = [
+    "mlflow[auth]>=3.11.1",
+]

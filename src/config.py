@@ -43,14 +43,16 @@ class Settings(BaseSettings):
         alias="KVAE_PRETRAINED_PATH",
     )
     kvae_subfolder: str = Field(default="diffusers", alias="KVAE_SUBFOLDER")
-    kvae_batch_size: int = Field(default=32, alias="KVAE_BATCH_SIZE")
+    kvae_batch_size: int = Field(default=16, alias="KVAE_BATCH_SIZE")
     kvae_input_h: int = Field(default=240, alias="KVAE_INPUT_H")
     kvae_input_w: int = Field(default=520, alias="KVAE_INPUT_W")
     kvae_latents_54_key: str = Field(default="latents_54x30", alias="KVAE_LATENTS_54_KEY")
     kvae_latents_16_key: str = Field(default="latents_16x30", alias="KVAE_LATENTS_16_KEY")
     kvae_latents_edge_width: int = Field(default=8, alias="KVAE_LATENTS_EDGE_WIDTH")
     kvae_frames_key: str = Field(default="frames", alias="KVAE_FRAMES_KEY")
-    kvae_decode_output_suffix: str = Field(default="_decoded.sft", alias="KVAE_DECODE_OUTPUT_SUFFIX")
+    kvae_decode_output_suffix: str = Field(
+        default="_decoded.sft", alias="KVAE_DECODE_OUTPUT_SUFFIX"
+    )
 
     @property
     def default_device(self) -> str:
