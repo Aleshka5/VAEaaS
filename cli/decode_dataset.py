@@ -35,8 +35,7 @@ def _reconstruct_latents_70x30(
         raise ValueError(f"Ожидается ширина 54 у latents_54x30, получено {latents_54x30.shape[-1]}")
     if latents_16x30.shape[-1] != edge_width * 2:
         raise ValueError(
-            f"Ожидается ширина {edge_width * 2} у latents_16x30, "
-            f"получено {latents_16x30.shape[-1]}"
+            f"Ожидается ширина {edge_width * 2} у latents_16x30, получено {latents_16x30.shape[-1]}"
         )
 
     left = latents_16x30[:, :, :, :edge_width]
@@ -76,7 +75,9 @@ def main() -> None:
     parser.add_argument("--latents-16-key", default=settings.kvae_latents_16_key)
     parser.add_argument("--latents-edge-width", type=int, default=settings.kvae_latents_edge_width)
     parser.add_argument(
-        "--output-key", default=settings.kvae_frames_key, help="Ключ тензора кадров в выходном .sft."
+        "--output-key",
+        default=settings.kvae_frames_key,
+        help="Ключ тензора кадров в выходном .sft.",
     )
     parser.add_argument(
         "--device", default=settings.default_device if torch.cuda.is_available() else "cpu"

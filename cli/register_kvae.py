@@ -24,8 +24,12 @@ def main() -> None:
         default=str(settings.kvae_pretrained_path),
         help="Путь к локальному snapshot модели KVAE.",
     )
-    parser.add_argument("--encoder-model-name", required=True, help="Имя encoder модели в MLflow registry.")
-    parser.add_argument("--decoder-model-name", required=True, help="Имя decoder модели в MLflow registry.")
+    parser.add_argument(
+        "--encoder-model-name", required=True, help="Имя encoder модели в MLflow registry."
+    )
+    parser.add_argument(
+        "--decoder-model-name", required=True, help="Имя decoder модели в MLflow registry."
+    )
     parser.add_argument(
         "--subfolder",
         default=settings.kvae_subfolder,

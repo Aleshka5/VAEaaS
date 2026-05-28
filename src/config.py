@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     mlflow_registry_uri: str | None = Field(default=None, alias="MLFLOW_REGISTRY_URI")
     mlflow_experiment_name: str = Field(default="VAE", alias="MLFLOW_EXPERIMENT_NAME")
 
-    kvae_pretrained_path: Path = Field(
+    kvae_pretrained_path: Path | None = Field(
         default=None,
         alias="KVAE_PRETRAINED_PATH",
     )
