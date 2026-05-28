@@ -24,6 +24,8 @@ class ApiSettings(BaseSettings):
     max_concurrent_inference: int = Field(
         default=4, alias="KVAE_API_MAX_CONCURRENT_INFERENCE", ge=1
     )
+    cache_enabled: bool = Field(default=True, alias="KVAE_API_CACHE_ENABLED")
+    cache_max_entries: int = Field(default=128, alias="KVAE_API_CACHE_MAX_ENTRIES", ge=1)
     torch_num_threads: int = Field(default=4, alias="KVAE_API_TORCH_NUM_THREADS", ge=1)
     torch_num_interop_threads: int = Field(
         default=1,

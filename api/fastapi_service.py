@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import threading
+from collections import OrderedDict
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any
@@ -52,6 +55,48 @@ class ModelState:
 state = ModelState()
 api_settings = get_api_settings()
 inference_semaphore = asyncio.Semaphore(api_settings.max_concurrent_inference)
+
+
+@dataclass
+class CacheEntry:
+    payload: list[Any]
+    shape: list[int]
+
+
+class InferenceResponseCache:
+    def __init__(self, *, max_entries: int) -> None:
+        self._max_entries = max_entries
+        self._items: OrderedDict[str, CacheEntry] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> tuple[list[Any], list[int]] | None:
+        with self._lock:
+            entry = self._items.get(key)
+            if entry is None:
+                return None
+            self._items.move_to_end(key)
+            return entry.payload, entry.shape
+
+    def put(self, key: str, payload: list[Any], shape: list[int]) -> None:
+        with self._lock:
+            self._items[key] = CacheEntry(
+                payload=payload,
+                shape=shape,
+            )
+            self._items.move_to_end(key)
+            while len(self._items) > self._max_entries:
+                self._items.popitem(last=False)
+
+
+encode_response_cache: InferenceResponseCache | None = None
+decode_response_cache: InferenceResponseCache | None = None
+if api_settings.cache_enabled:
+    encode_response_cache = InferenceResponseCache(
+        max_entries=api_settings.cache_max_entries,
+    )
+    decode_response_cache = InferenceResponseCache(
+        max_entries=api_settings.cache_max_entries,
+    )
 
 
 def _configure_torch_threading() -> None:
@@ -157,13 +202,18 @@ async def encode(payload: EncodeRequest) -> EncodeResponse:
     encoder, _, device = await _ensure_ready()
     try:
         async with inference_semaphore:
-            latents = await asyncio.to_thread(_run_encode_inference, payload.frames, encoder, device)
+            latents_payload, shape = await asyncio.to_thread(
+                _run_encode_inference,
+                payload.frames,
+                encoder,
+                device,
+            )
     except (TypeError, ValueError, RuntimeError) as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid frames tensor payload: {error}",
         ) from error
-    return EncodeResponse(latents=latents.tolist(), shape=list(latents.shape))
+    return EncodeResponse(latents=latents_payload, shape=shape)
 
 
 @app.post("/decode", response_model=DecodeResponse)
@@ -171,33 +221,68 @@ async def decode(payload: DecodeRequest) -> DecodeResponse:
     _, decoder, device = await _ensure_ready()
     try:
         async with inference_semaphore:
-            frames = await asyncio.to_thread(_run_decode_inference, payload.latents, decoder, device)
+            frames_payload, shape = await asyncio.to_thread(
+                _run_decode_inference,
+                payload.latents,
+                decoder,
+                device,
+            )
     except (TypeError, ValueError, RuntimeError) as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid latents tensor payload: {error}",
         ) from error
-    return DecodeResponse(frames=frames.tolist(), shape=list(frames.shape))
+    return DecodeResponse(frames=frames_payload, shape=shape)
 
 
 def _run_encode_inference(
     raw_frames: list[Any], encoder: torch.nn.Module, device: str
-) -> torch.Tensor:
+) -> tuple[list[Any], list[int]]:
     frames = torch.as_tensor(raw_frames, dtype=torch.float32, device=device)
     frames = _to_nchw_float01(frames)
     frames = frames * 2.0 - 1.0
+    cache_key = _build_tensor_cache_key("encode", frames)
+    if encode_response_cache is not None:
+        cached = encode_response_cache.get(cache_key)
+        if cached is not None:
+            return cached
     with torch.no_grad():
-        return encoder(frames).detach().float().cpu()
+        latents = encoder(frames).detach().float().cpu()
+    payload = latents.tolist()
+    shape = list(latents.shape)
+    if encode_response_cache is not None:
+        encode_response_cache.put(cache_key, payload, shape)
+    return payload, shape
 
 
 def _run_decode_inference(
     raw_latents: list[Any], decoder: torch.nn.Module, device: str
-) -> torch.Tensor:
+) -> tuple[list[Any], list[int]]:
     latents = torch.as_tensor(raw_latents, dtype=torch.float32, device=device)
     if latents.ndim == 3:
         latents = latents.unsqueeze(0)
     if latents.ndim != 4:
         raise ValueError(f"Expected [N, C, H, W], got shape={tuple(latents.shape)}.")
+    cache_key = _build_tensor_cache_key("decode", latents)
+    if decode_response_cache is not None:
+        cached = decode_response_cache.get(cache_key)
+        if cached is not None:
+            return cached
     with torch.no_grad():
         frames_nchw = decoder(latents)
-    return _to_uint8_nhwc(frames_nchw).cpu()
+    frames = _to_uint8_nhwc(frames_nchw).cpu()
+    payload = frames.tolist()
+    shape = list(frames.shape)
+    if decode_response_cache is not None:
+        decode_response_cache.put(cache_key, payload, shape)
+    return payload, shape
+
+
+def _build_tensor_cache_key(prefix: str, tensor: torch.Tensor) -> str:
+    cpu_tensor = tensor.detach().to(device="cpu").contiguous()
+    hasher = hashlib.sha256()
+    hasher.update(prefix.encode("utf-8"))
+    hasher.update(str(tuple(cpu_tensor.shape)).encode("utf-8"))
+    hasher.update(str(cpu_tensor.dtype).encode("utf-8"))
+    hasher.update(cpu_tensor.numpy().tobytes())
+    return hasher.hexdigest()
